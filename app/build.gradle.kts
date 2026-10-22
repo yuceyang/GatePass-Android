@@ -25,8 +25,8 @@ android {
         applicationId = "com.yuceyang.gatepassandroid"
         minSdk = 29
         targetSdk = 36
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = 2
+        versionName = "0.1.1"
         testInstrumentationRunner = "android.test.InstrumentationTestRunner"
     }
 
