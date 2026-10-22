@@ -1,0 +1,21 @@
+# Gradle / build output
+.gradle/
+.kotlin/
+/build/
+/app/build/
+
+# Local machine configuration (never commit: contains the SDK path)
+local.properties
+
+# IDE
+*.iml
+.idea/
+.DS_Store
+
+# Signing material — never commit keys
+*.jks
+*.keystore
+keystore.properties
+
+# Locally produced APKs; releases are attached to GitHub Releases instead
+/dist/
