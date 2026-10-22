@@ -182,15 +182,17 @@ class Socks5ProxyServer(
             headers.forEach { (name, value) ->
                 if (name.lowercase() !in HOP_BY_HOP_HEADERS &&
                     !name.equals("cookie", true) &&
-                    !name.equals("host", true) &&
-                    !name.equals("authorization", true)
+                    !name.equals("host", true)
                 ) {
                     upstreamOutput.write("$name: $value\r\n".toByteArray(Charsets.ISO_8859_1))
                 }
             }
             upstreamOutput.write("Host: $host\r\n".toByteArray(Charsets.ISO_8859_1))
-            // Some Docker apps sit behind HTTP Basic on the gateway; mirror the desktop agent.
-            if (nas.username.isNotBlank()) {
+            // Some Docker apps sit behind HTTP Basic on the gateway, but the client's own
+            // Authorization (Bearer, etc.) must win when present — otherwise per-app tokens
+            // such as Bitwarden's /api/sync credential get clobbered and sync fails with 401.
+            val clientAuthorization = headers.firstOrNull { it.first.equals("Authorization", true) }?.second
+            if (clientAuthorization.isNullOrBlank() && nas.username.isNotBlank()) {
                 val basic = java.util.Base64.getEncoder()
                     .encodeToString("${nas.username}:${nas.password}".toByteArray(Charsets.UTF_8))
                 upstreamOutput.write("Authorization: Basic $basic\r\n".toByteArray(Charsets.ISO_8859_1))
@@ -198,7 +200,8 @@ class Socks5ProxyServer(
             val clientCookies = headers.firstOrNull { it.first.equals("cookie", true) }?.second.orEmpty()
             val cookies = mergeCookies(clientCookies, session.cookies, "ugreen-proxy-token=$gatewayToken")
             if (cookies.isNotBlank()) upstreamOutput.write("Cookie: $cookies\r\n".toByteArray(Charsets.ISO_8859_1))
-            upstreamOutput.write("Connection: keep-alive\r\n\r\n".toByteArray(Charsets.ISO_8859_1))
+            upstreamOutput.write("Connection: keep-alive\r\n\r\n".toByteArray(Charsets.ISO_8859_1))
+
             Http1Framing.copyRequestBody(clientInput, upstreamOutput, headers, MAX_BODY_BYTES)
             upstreamOutput.flush()
 
@@ -210,7 +213,8 @@ class Socks5ProxyServer(
                     clientOutput.write("$name: $value\r\n".toByteArray(Charsets.ISO_8859_1))
                 }
             }
-            clientOutput.write("Connection: close\r\n\r\n".toByteArray(Charsets.ISO_8859_1))
+            clientOutput.write("Connection: close\r\n\r\n".toByteArray(Charsets.ISO_8859_1))
+
             clientOutput.flush()
             val selfDelimited = Http1Framing.copyResponseBody(upstreamInput, clientOutput, head, request.method)
             clientOutput.flush()

@@ -38,6 +38,8 @@ class MainActivity : Activity() {
     private lateinit var logView: TextView
     private lateinit var routeList: LinearLayout
     private lateinit var vpnState: TextView
+    private lateinit var startVpnButton: Button
+    private lateinit var stopVpnButton: Button
     private lateinit var caState: TextView
     /** Set when we leave for the certificate screen so we can restore the tunnel on return. */
     private var resumeVpnAfterSettings = false
@@ -126,13 +128,15 @@ class MainActivity : Activity() {
                 setPadding(0, 0, 0, dp(8))
             }
             addView(vpnState, matchWidth())
-            addView(primaryButton("启动 GatePass VPN") { requestVpn() }, matchWidth())
-            addView(secondaryButton("停止 VPN") {
+            startVpnButton = primaryButton("启动 GatePass VPN") { requestVpn() }
+            stopVpnButton = secondaryButton("停止 VPN") {
                 startService(Intent(this@MainActivity, GatePassVpnService::class.java).setAction(GatePassVpnService.ACTION_STOP))
                 DiagLog.log("已请求停止 VPN")
                 showStatus("已请求停止 VPN")
                 vpnState.postDelayed({ refreshVpnState() }, 1200)
-            }, matchWidth())
+            }
+            addView(startVpnButton, matchWidth())
+            addView(stopVpnButton, matchWidth())
             status = TextView(this@MainActivity).apply {
                 text = "就绪"
                 textSize = 13f
@@ -466,6 +470,21 @@ class MainActivity : Activity() {
             "○ 未连接"
         }
         vpnState.setTextColor(if (active) COLOR_PRIMARY_DARK else COLOR_MUTED)
+        // While the tunnel is up, "Start" is meaningless and "Stop" is the only sensible action —
+        // so dim the former and promote the latter.
+        if (::startVpnButton.isInitialized && ::stopVpnButton.isInitialized) {
+            startVpnButton.isEnabled = !active
+            startVpnButton.alpha = if (active) 0.45f else 1f
+            stopVpnButton.isEnabled = active
+            stopVpnButton.alpha = if (active) 1f else 0.45f
+            if (active) {
+                stopVpnButton.setTextColor(android.graphics.Color.WHITE)
+                stopVpnButton.background = rounded(COLOR_PRIMARY, dp(10))
+            } else {
+                stopVpnButton.setTextColor(COLOR_PRIMARY_DARK)
+                stopVpnButton.background = rounded(COLOR_LOG_BG, dp(10))
+            }
+        }
     }
 
     private fun refreshCaState() {

@@ -206,7 +206,12 @@ class LocalHttpIngress(
                 }
             }
             upstreamOut.write("Host: $host\r\n".toByteArray(Charsets.ISO_8859_1))
-            if (nas.username.isNotBlank()) {
+            // Only synthesize NAS Basic auth when the client did not authenticate itself.
+            // Overwriting this header breaks apps that use it for their own tokens — Bitwarden
+            // sends "Authorization: Bearer <token>" on /api/sync, and replacing it makes the
+            // vault sync fail with 401 even though login succeeded.
+            val clientAuthorization = headers.firstOrNull { it.first.equals("Authorization", true) }?.second
+            if (clientAuthorization.isNullOrBlank() && nas.username.isNotBlank()) {
                 val basic = java.util.Base64.getEncoder()
                     .encodeToString("${nas.username}:${nas.password}".toByteArray(Charsets.UTF_8))
                 upstreamOut.write("Authorization: Basic $basic\r\n".toByteArray(Charsets.ISO_8859_1))
@@ -334,7 +339,7 @@ class LocalHttpIngress(
         private const val MAX_WORKERS = 16
         private val DROP_REQUEST_HEADERS = setOf(
             "connection", "proxy-connection", "keep-alive", "te", "trailer",
-            "transfer-encoding", "upgrade", "host", "cookie", "authorization",
+            "transfer-encoding", "upgrade", "host", "cookie",
             // We send the body immediately; waiting for 100-continue would deadlock the relay.
             "expect",
         )
