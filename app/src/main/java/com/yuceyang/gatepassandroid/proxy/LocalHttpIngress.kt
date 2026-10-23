@@ -211,6 +211,12 @@ class LocalHttpIngress(
             // sends "Authorization: Bearer <token>" on /api/sync, and replacing it makes the
             // vault sync fail with 401 even though login succeeded.
             val clientAuthorization = headers.firstOrNull { it.first.equals("Authorization", true) }?.second
+            DiagLog.log(
+                "鉴权头: " + when {
+                    clientAuthorization.isNullOrBlank() -> "客户端未提供，注入 NAS Basic"
+                    else -> "透传客户端 ${clientAuthorization.substringBefore(' ')} 令牌"
+                },
+            )
             if (clientAuthorization.isNullOrBlank() && nas.username.isNotBlank()) {
                 val basic = java.util.Base64.getEncoder()
                     .encodeToString("${nas.username}:${nas.password}".toByteArray(Charsets.UTF_8))

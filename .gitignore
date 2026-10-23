@@ -19,3 +19,6 @@ keystore.properties
 
 # Locally produced APKs; releases are attached to GitHub Releases instead
 /dist/
+
+# Local handoff notes (may contain real hostnames)
+/HANDOFF.md
