@@ -27,17 +27,46 @@ class SecureSettingsStore(context: Context) {
         password = decrypt(prefs.getString("nas_password", null)),
     )
 
-    fun saveSession(sessionToken: String, cookieHeader: String) {
+    /**
+     * Stores the NAS session together with when it was obtained.
+     *
+     * The UGOS login token lives for roughly 12 hours; recording the timestamp lets the UI show
+     * "logged in / expiring / expired" instead of failing later with an opaque 401.
+     */
+    fun saveSession(sessionToken: String, cookieHeader: String, nowEpochMs: Long = System.currentTimeMillis()) {
         prefs.edit()
             .putString("session_token", encrypt(sessionToken))
             .putString("session_cookie", encrypt(cookieHeader))
+            .putLong("session_obtained_at", nowEpochMs)
             .apply()
     }
 
     fun loadSession(): AuthSession = AuthSession(
         token = decrypt(prefs.getString("session_token", null)),
         cookies = decrypt(prefs.getString("session_cookie", null)),
+        obtainedAtEpochMs = prefs.getLong("session_obtained_at", 0L),
     )
+
+    /** Login state derived from storage alone, without touching the network. */
+    fun sessionState(nowEpochMs: Long = System.currentTimeMillis()): SessionState {
+        val s = loadSession()
+        if (s.token.isBlank() && s.cookies.isBlank()) return SessionState.Missing
+        if (s.obtainedAtEpochMs <= 0L) return SessionState.Unknown
+        val ageMs = nowEpochMs - s.obtainedAtEpochMs
+        return when {
+            ageMs >= SESSION_TTL_MS -> SessionState.Expired
+            ageMs >= SESSION_TTL_MS - SESSION_WARN_MS -> SessionState.Expiring
+            else -> SessionState.Valid
+        }
+    }
+
+    /** How long the current session has been alive, or null when unknown/no session. */
+    fun sessionAgeMs(nowEpochMs: Long = System.currentTimeMillis()): Long? {
+        val s = loadSession()
+        return if (s.obtainedAtEpochMs <= 0L) null else (nowEpochMs - s.obtainedAtEpochMs).coerceAtLeast(0L)
+    }
+
+    enum class SessionState { Valid, Expiring, Expired, Missing, Unknown }
 
     fun saveCaMaterial(privateKeyPkcs8: ByteArray, certificateDer: ByteArray) {
         prefs.edit()
@@ -252,17 +281,22 @@ class SecureSettingsStore(context: Context) {
     }
 
     data class NasSettings(val baseUrl: String, val username: String, val password: String)
-    data class AuthSession(val token: String, val cookies: String)
+    data class AuthSession(val token: String, val cookies: String, val obtainedAtEpochMs: Long = 0L)
     data class CaMaterial(val privateKeyPkcs8: ByteArray, val certificateDer: ByteArray)
     data class LeafMaterial(val privateKeyPkcs8: ByteArray, val certificateDer: ByteArray, val expiresAtEpochMs: Long)
 
-    private companion object {
-        const val ANDROID_KEYSTORE = "AndroidKeyStore"
-        const val KEY_ALIAS = "gatepass.nas.credentials.v1"
-        const val TRANSFORMATION = "AES/GCM/NoPadding"
-        const val IV_LENGTH = 12
-        const val LEAF_RENEW_MARGIN_MS = 12L * 60 * 60 * 1000
-        const val INGRESS_ENABLED_KEY = "ingress_enabled_hosts"
-        const val KEY_DOMAIN_SUFFIX = "domain_suffix"
+    companion object {
+        private const val ANDROID_KEYSTORE = "AndroidKeyStore"
+        private const val KEY_ALIAS = "gatepass.nas.credentials.v1"
+        private const val TRANSFORMATION = "AES/GCM/NoPadding"
+        private const val IV_LENGTH = 12
+        private const val LEAF_RENEW_MARGIN_MS = 12L * 60 * 60 * 1000
+        private const val INGRESS_ENABLED_KEY = "ingress_enabled_hosts"
+        private const val KEY_DOMAIN_SUFFIX = "domain_suffix"
+
+        /** UGOS keeps a login alive for about this long; used to warn before it lapses. */
+        const val SESSION_TTL_MS = 12L * 60 * 60 * 1000
+        /** Start showing a heads-up once the session is within this window of expiring. */
+        const val SESSION_WARN_MS = 2L * 60 * 60 * 1000
     }
 }

@@ -37,6 +37,8 @@ class MainActivity : androidx.activity.ComponentActivity() {
     private lateinit var routeHost: EditText
     private lateinit var status: TextView
     private lateinit var logView: TextView
+    private lateinit var loginButton: Button
+    private lateinit var loginStateView: TextView
     private lateinit var routeList: LinearLayout
     private lateinit var vpnState: TextView
     private lateinit var startVpnButton: Button
@@ -70,6 +72,7 @@ class MainActivity : androidx.activity.ComponentActivity() {
         store = SecureSettingsStore(this)
         buildUi()
         restoreFields()
+        refreshLoginState()
         DiagLog.addListener(::refreshLog)
         refreshLog()
         refreshVpnState()
@@ -79,6 +82,7 @@ class MainActivity : androidx.activity.ComponentActivity() {
         super.onResume()
         refreshVpnState()
         refreshCaState()
+        refreshLoginState()
         // Opening Settings (e.g. to install the CA) tears the VPN down on some OEM builds.
         // Restore it automatically so the user does not have to start it again.
         if (resumeVpnAfterSettings) {
@@ -117,7 +121,13 @@ class MainActivity : androidx.activity.ComponentActivity() {
             addView(baseUrl, matchWidth())
             addView(username, matchWidth())
             addView(password, matchWidth())
-            addView(primaryButton("保存并测试登录") { testLogin() }, matchWidth())
+            loginStateView = TextView(this@MainActivity).apply {
+                textSize = 13f
+                setPadding(0, 0, 0, dp(8))
+            }
+            addView(loginStateView, matchWidth())
+            loginButton = primaryButton("保存并测试登录") { testLogin() }
+            addView(loginButton, matchWidth())
         })
 
         page.addView(card("代理路由", "为每个 NAS 应用域名单独开启 HTTP 入口，然后复制地址到对应应用。") {
@@ -247,6 +257,65 @@ class MainActivity : androidx.activity.ComponentActivity() {
     }
 
     // ---------------------------------------------------------------- routes
+
+    /**
+     * Reflects the stored NAS session in the login card: text describes the state, and the button
+     * changes colour so "am I logged in?" is answerable at a glance.
+     */
+    private fun refreshLoginState() {
+        if (!::loginStateView.isInitialized || !::loginButton.isInitialized) return
+        val state = store.sessionState()
+        val age = store.sessionAgeMs()
+        val ttlHours = SecureSettingsStore.SESSION_TTL_MS / 3_600_000L
+
+        when (state) {
+            SecureSettingsStore.SessionState.Valid -> {
+                val left = ttlHours - (age ?: 0L) / 3_600_000L
+                loginStateView.text = "● 已登录 NAS · 约 ${left.coerceAtLeast(0)} 小时后到期"
+                loginStateView.setTextColor(COLOR_PRIMARY_DARK)
+                stylePrimary(loginButton, "已登录 · 重新登录")
+            }
+            SecureSettingsStore.SessionState.Expiring -> {
+                val left = ttlHours - (age ?: 0L) / 3_600_000L
+                loginStateView.text = "● 已登录，但约 ${left.coerceAtLeast(0)} 小时后到期，建议重新登录"
+                loginStateView.setTextColor(COLOR_WARN)
+                styleWarn(loginButton, "即将过期 · 点此重新登录")
+            }
+            SecureSettingsStore.SessionState.Expired -> {
+                loginStateView.text = "● 会话已过期（超过 ${ttlHours} 小时），请重新登录"
+                loginStateView.setTextColor(COLOR_DANGER)
+                styleDanger(loginButton, "会话已过期 · 重新登录")
+            }
+            SecureSettingsStore.SessionState.Missing -> {
+                loginStateView.text = "○ 尚未登录 NAS"
+                loginStateView.setTextColor(COLOR_MUTED)
+                stylePrimary(loginButton, "保存并测试登录")
+            }
+            SecureSettingsStore.SessionState.Unknown -> {
+                loginStateView.text = "○ 有会话凭据，但无法判断是否过期"
+                loginStateView.setTextColor(COLOR_MUTED)
+                stylePrimary(loginButton, "重新登录以刷新有效期")
+            }
+        }
+    }
+
+    private fun stylePrimary(button: Button, label: String) {
+        button.text = label
+        button.setTextColor(android.graphics.Color.WHITE)
+        button.background = rounded(COLOR_PRIMARY, dp(10))
+    }
+
+    private fun styleWarn(button: Button, label: String) {
+        button.text = label
+        button.setTextColor(android.graphics.Color.WHITE)
+        button.background = rounded(COLOR_WARN, dp(10))
+    }
+
+    private fun styleDanger(button: Button, label: String) {
+        button.text = label
+        button.setTextColor(android.graphics.Color.WHITE)
+        button.background = rounded(COLOR_DANGER, dp(10))
+    }
 
     private fun refreshRoutes() {
         val routes = store.loadRoutes().sorted()
@@ -382,7 +451,10 @@ class MainActivity : androidx.activity.ComponentActivity() {
     private fun testLogin() {
         val base = baseUrl.text.toString().trim()
         val user = username.text.toString().trim()
-        val pass = password.text.toString()
+        // An imported config restores the password into storage but leaves the field empty (it is
+        // a password field). Fall back to the stored one instead of refusing to log in.
+        val stored = store.loadNas().password
+        val pass = password.text.toString().ifBlank { stored }
         if (base.isBlank() || user.isBlank() || pass.isBlank()) {
             showStatus("请填写 NAS 地址、用户名和密码")
             return
@@ -395,6 +467,7 @@ class MainActivity : androidx.activity.ComponentActivity() {
                 result.onSuccess { session ->
                     store.saveSession(session.sessionToken, session.cookieHeader)
                     password.setText("")
+                    refreshLoginState()
                     showStatus("NAS 登录成功")
                 }.onFailure { error ->
                     DiagLog.error("NAS 登录失败", error)
@@ -717,6 +790,7 @@ class MainActivity : androidx.activity.ComponentActivity() {
         private val COLOR_PRIMARY_DARK = Color.parseColor("#14532D")
         private val COLOR_TEXT = Color.parseColor("#1F2937")
         private val COLOR_MUTED = Color.parseColor("#6B7280")
+        private val COLOR_WARN = Color.parseColor("#C2410C")
         private val COLOR_LOG_BG = Color.parseColor("#F1F5F9")
         private val COLOR_ENABLED_BG = Color.parseColor("#ECFDF5")
         private val COLOR_DANGER = Color.parseColor("#B91C1C")

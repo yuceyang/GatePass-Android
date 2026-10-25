@@ -161,6 +161,10 @@ class Socks5ProxyServer(
             DiagLog.log("拦截 $host：尚未登录 NAS")
             return writeError(clientOutput, 401, "NAS login required")
         }
+        if (store.sessionState() == SecureSettingsStore.SessionState.Expired) {
+            DiagLog.log("拦截 $host：NAS 会话已过期，请在 GatePass 中重新登录")
+            return writeError(clientOutput, 401, "NAS session expired — reopen GatePass and log in again")
+        }
         val gatewayToken = store.loadGatewayToken(host).ifBlank {
             DiagLog.log("缓存无网关令牌，刷新 $host")
             val issued = UgosAuthClient(underlyingNetwork, DiagLog::log).gatewayToken(
