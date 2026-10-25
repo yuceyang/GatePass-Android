@@ -141,6 +141,39 @@ GATEPASS_KEY_PASSWORD=***
 > 本仓库的 `app/build.gradle.kts` 当前只配置了 debug 签名；如需要 release 签名，
 > 请按上面的属性名自行加入 `signingConfigs`。这样设计是为了让仓库本身不含任何密钥材料。
 
+## 多终端配置同步
+
+安卓端与 PC 端 GatePass 使用**同一份配置文件**，换设备不用重新填写。
+
+```jsonc
+{
+  "$schema": "gatepass-portable/v1",
+  "version": 1,
+  "provider": {
+    "id": "ugos",
+    "authBase": "https://nas.example",
+    "username": "you",
+    "password": "••••",
+    "domainSuffix": "example.ugdocker.link"
+  },
+  "routes": [
+    { "host": "app-5006-example.ugdocker.link", "enabled": true, "httpIngress": true }
+  ]
+}
+```
+
+**只包含跨平台通用的内容**：NAS 地址、账号密码、路由列表。监听端口、开机自启、
+hosts、CA 信任这些因平台而异的状态**不在文件里**，所以同一个文件在每台设备上都能直接用。
+
+| 端 | 导出 | 导入 |
+|---|---|---|
+| Android | 应用内「多终端配置 → 导出配置」 | 「导入配置…」选择 JSON 文件 |
+| PC (Node) | `gatepass export [文件]` | `gatepass import <文件>` |
+
+> ⚠️ 含密码的导出文件是**明文**，请勿提交到仓库或公开分享。选「不含密码」可导出可分享的版本。
+
+iOS 客户端尚未实现，但沿用同一 `gatepass-portable/v1` 格式即可互通。
+
 ## 架构
 
 ```
