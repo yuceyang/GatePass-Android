@@ -124,6 +124,9 @@ class GatePassVpnService : VpnService() {
             nativeTunnelStarted = true
             isRunning = true
             DiagLog.log("HEV tun2socks 已启动")
+            runCatching {
+                DiagLog.log("当前 CA 指纹: ${CertificateAuthority(this).rootFingerprint()}")
+            }
             registerNetworkCallback()
             housekeeping.postDelayed(housekeepingTask, HOUSEKEEPING_INTERVAL_MS)
             updateNotification("VPN 已连接 · 系统 DNS 域名路由已启用")

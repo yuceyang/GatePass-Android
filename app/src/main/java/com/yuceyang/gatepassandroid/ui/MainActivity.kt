@@ -395,15 +395,55 @@ class MainActivity : Activity() {
         }
     }
 
-    /** Writes the PEM so Android's file picker can find it; returns the path for display. */
+    /**
+     * Writes the PEM into the public Downloads folder via MediaStore.
+     *
+     * A plain File write to Environment.getExternalStoragePublicDirectory silently does nothing
+     * on Android 10+ without legacy storage, which made the "export" button appear to work while
+     * leaving a stale certificate behind.
+     */
     private fun writeCaToDownloads(): String {
         val der = CertificateAuthority(this).rootCertificateDer()
         val body = android.util.Base64.encodeToString(der, android.util.Base64.NO_WRAP).chunked(64).joinToString(NEWLINE)
         val pem = "-----BEGIN CERTIFICATE-----$NEWLINE" + body + "${NEWLINE}-----END CERTIFICATE-----$NEWLINE"
-        val dir = android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_DOWNLOADS)
-        val file = java.io.File(dir, CA_FILE_NAME)
-        file.writeText(pem, Charsets.US_ASCII)
-        return file.absolutePath
+        val bytes = pem.toByteArray(Charsets.US_ASCII)
+
+        val resolver = contentResolver
+        // Replace any previous export first: MediaStore would otherwise create
+        // "gatepass-ca (1).crt" next to the stale file, and the user would install the old CA.
+        runCatching {
+            resolver.delete(
+                android.provider.MediaStore.Downloads.EXTERNAL_CONTENT_URI,
+                "${android.provider.MediaStore.MediaColumns.DISPLAY_NAME} LIKE ?",
+                arrayOf("gatepass-ca%"),
+            )
+        }
+
+        val collection = android.content.ContentValues().apply {
+            put(android.provider.MediaStore.MediaColumns.DISPLAY_NAME, CA_FILE_NAME)
+            put(android.provider.MediaStore.MediaColumns.MIME_TYPE, "application/x-x509-ca-cert")
+            put(
+                android.provider.MediaStore.MediaColumns.RELATIVE_PATH,
+                android.os.Environment.DIRECTORY_DOWNLOADS,
+            )
+            put(android.provider.MediaStore.MediaColumns.IS_PENDING, 1)
+        }
+        val uri = resolver.insert(android.provider.MediaStore.Downloads.EXTERNAL_CONTENT_URI, collection)
+            ?: throw IllegalStateException("无法在 Download 目录创建文件")
+
+        resolver.openOutputStream(uri)?.use { it.write(bytes) }
+            ?: throw IllegalStateException("无法写入证书文件")
+
+        resolver.update(
+            uri,
+            android.content.ContentValues().apply {
+                put(android.provider.MediaStore.MediaColumns.IS_PENDING, 0)
+            },
+            null,
+            null,
+        )
+        DiagLog.log("CA 已写入 Download/$CA_FILE_NAME（${bytes.size} 字节）")
+        return "Download/$CA_FILE_NAME"
     }
 
     /**

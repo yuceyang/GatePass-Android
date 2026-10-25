@@ -177,6 +177,23 @@ app/src/main/java/com/yuceyang/gatepassandroid/
 - Android 不允许应用静默安装 CA，B 方案必须由用户在系统设置中确认一次
 - 未在大量机型上验证；已知在 ColorOS（Android 16）上工作正常
 
+### ⚠️ 本地 CA 会随重装变化（最常见的坑）
+
+GatePass 的根证书在**首次运行时生成**，数据被清除或卸载重装后会**重新生成一张新的**。
+如果你之前装过旧 CA，浏览器/应用仍会用它验证，握手会失败并报：
+
+```
+CERTIFICATE_UNKNOWN / BLOCK_TYPE_IS_NOT_01 / 「无法验证服务器证书」
+```
+
+**判断方法**：在 GatePass 日志里找到「当前 CA 指纹」，与已安装证书的指纹对比，
+不一致就是这个问题。
+
+**处理**：点「一键安装根证书」重新导出并安装，然后重启 VPN。
+
+> 因此建议：**先装好最终要用的版本（release），再装 CA**。在 debug 和 release 之间切换
+> 必须先卸载（签名不同），每次切换都会换一张 CA，需要重新安装。
+
 ## 安全说明
 
 - 所有凭据使用 Android Keystore 派生的密钥加密，`allowBackup=false`

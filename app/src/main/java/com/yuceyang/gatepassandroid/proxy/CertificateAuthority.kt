@@ -37,6 +37,12 @@ class CertificateAuthority(context: Context) {
 
     fun rootCertificateDer(): ByteArray = caMaterial.certificateDer.copyOf()
 
+    /** SHA-256 of the CA certificate, for comparing against the one installed on the device. */
+    fun rootFingerprint(): String =
+        java.security.MessageDigest.getInstance("SHA-256")
+            .digest(caMaterial.certificateDer)
+            .joinToString(":") { "%02X".format(it) }
+
     fun serverContext(host: String): SSLContext {
         val normalizedHost = host.trim().lowercase()
         require(normalizedHost.isNotBlank() && normalizedHost.length <= 253) { "Invalid certificate host" }
