@@ -86,6 +86,63 @@ class SecureSettingsStore(context: Context) {
             Base64.URL_SAFE or Base64.NO_WRAP or Base64.NO_PADDING,
         )
 
+    /** Builds the portable snapshot from what is currently stored. */
+    fun toPortable(includePassword: Boolean = true): PortableConfig.Data {
+        val nas = loadNas()
+        return PortableConfig.Data(
+            providerId = "ugos",
+            authBase = nas.baseUrl,
+            username = nas.username,
+            password = if (includePassword) nas.password else "",
+            domainSuffix = persistedDomainSuffix().ifBlank { deriveDomainSuffix(loadRoutes()) },
+            routes = loadRoutes().sorted().map { host ->
+                PortableConfig.Rule(
+                    host = host,
+                    enabled = true,
+                    httpIngress = isHttpIngressEnabled(host),
+                )
+            },
+        )
+    }
+
+    /** Applies an imported snapshot; returns how many routes were written. */
+    fun applyPortable(data: PortableConfig.Data): Int {
+        saveNas(data.authBase, data.username, data.password)
+        rememberDomainSuffix(data.domainSuffix)
+        val hosts = data.routes.filter { it.enabled }.map { it.host }
+        saveRoutes(hosts)
+        // Reset the ingress switches so the import is authoritative rather than additive.
+        prefs.edit().remove("ingress_enabled_hosts").apply()
+        data.routes.filter { it.enabled && it.httpIngress }.forEach {
+            setHttpIngressEnabled(it.host, true)
+        }
+        return hosts.size
+    }
+
+    /** Suffix remembered from the last import/export, so it survives a round trip. */
+    private fun persistedDomainSuffix(): String = prefs.getString(KEY_DOMAIN_SUFFIX, "") ?: ""
+
+    private fun rememberDomainSuffix(value: String) {
+        prefs.edit().putString(KEY_DOMAIN_SUFFIX, value.trim()).apply()
+    }
+
+    /**
+     * Fallback when no suffix was ever imported: the longest common suffix of the routes.
+     * Note this is coarser than the real gateway suffix (it cannot know the extra labels).
+     */
+    private fun deriveDomainSuffix(hosts: Set<String>): String {
+        if (hosts.isEmpty()) return ""
+        val split = hosts.map { it.split('.') }
+        val shortest = split.minOf { it.size }
+        var common = 0
+        while (common < shortest) {
+            val reference = split.first()
+            val candidate = reference[reference.size - 1 - common]
+            if (split.all { h -> h[h.size - 1 - common] == candidate }) common++ else break
+        }
+        return if (common == 0) "" else split.first().takeLast(common).joinToString(".")
+    }
+
     fun saveRoutes(hosts: Collection<String>) {
         prefs.edit().putStringSet("route_hosts", hosts.map { it.trim().lowercase() }.toSet()).apply()
     }
@@ -206,5 +263,6 @@ class SecureSettingsStore(context: Context) {
         const val IV_LENGTH = 12
         const val LEAF_RENEW_MARGIN_MS = 12L * 60 * 60 * 1000
         const val INGRESS_ENABLED_KEY = "ingress_enabled_hosts"
+        const val KEY_DOMAIN_SUFFIX = "domain_suffix"
     }
 }

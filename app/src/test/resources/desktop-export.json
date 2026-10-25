@@ -1,0 +1,28 @@
+{
+  "$schema": "gatepass-portable/v1",
+  "version": 1,
+  "provider": {
+    "id": "ugos",
+    "authBase": "https://nas.example",
+    "username": "redacted-user",
+    "password": "",
+    "domainSuffix": "example.ugdocker.link"
+  },
+  "routes": [
+    {
+      "host": "app-5006-example.ugdocker.link",
+      "enabled": true,
+      "httpIngress": true
+    },
+    {
+      "host": "app16601-example.ugdocker.link",
+      "enabled": true,
+      "httpIngress": true
+    },
+    {
+      "host": "app-9090-example.ugdocker.link",
+      "enabled": true,
+      "httpIngress": true
+    }
+  ]
+}

@@ -3,6 +3,8 @@ agp = "8.13.2"
 kotlin = "2.2.21"
 coreKtx = "1.16.0"
 junit = "4.13.2"
+orgJson = "20240303"
+activity = "1.10.1"
 bouncyCastle = "1.80"
 
 [libraries]
@@ -10,6 +12,8 @@ androidx-core-ktx = { module = "androidx.core:core-ktx", version.ref = "coreKtx"
 bcprov = { module = "org.bouncycastle:bcprov-jdk18on", version.ref = "bouncyCastle" }
 bcpkix = { module = "org.bouncycastle:bcpkix-jdk18on", version.ref = "bouncyCastle" }
 junit = { module = "junit:junit", version.ref = "junit" }
+org-json = { module = "org.json:json", version.ref = "orgJson" }
+androidx-activity = { module = "androidx.activity:activity-ktx", version.ref = "activity" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }

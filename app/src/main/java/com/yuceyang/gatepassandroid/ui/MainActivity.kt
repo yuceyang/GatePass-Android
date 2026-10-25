@@ -21,6 +21,7 @@ import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
 import com.yuceyang.gatepassandroid.auth.UgosAuthClient
+import com.yuceyang.gatepassandroid.data.PortableConfig
 import com.yuceyang.gatepassandroid.data.ProxyRoute
 import com.yuceyang.gatepassandroid.data.SecureSettingsStore
 import com.yuceyang.gatepassandroid.diag.DiagLog
@@ -28,7 +29,7 @@ import com.yuceyang.gatepassandroid.proxy.CertificateAuthority
 import com.yuceyang.gatepassandroid.proxy.LocalHttpIngress
 import com.yuceyang.gatepassandroid.vpn.GatePassVpnService
 
-class MainActivity : Activity() {
+class MainActivity : androidx.activity.ComponentActivity() {
     private lateinit var store: SecureSettingsStore
     private lateinit var baseUrl: EditText
     private lateinit var username: EditText
@@ -43,6 +44,26 @@ class MainActivity : Activity() {
     private lateinit var caState: TextView
     /** Set when we leave for the certificate screen so we can restore the tunnel on return. */
     private var resumeVpnAfterSettings = false
+    /** Remembers whether the pending export should include the password. */
+    private var pendingExportIncludePassword = true
+
+    private val vpnLauncher = registerForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.StartActivityForResult(),
+    ) { result ->
+        if (result.resultCode == RESULT_OK) {
+            startVpnService()
+        } else {
+            showStatus("未授予 VPN 权限")
+        }
+    }
+
+    private val exportLauncher = registerForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.CreateDocument("application/json"),
+    ) { uri -> if (uri != null) writePortable(uri, pendingExportIncludePassword) }
+
+    private val importLauncher = registerForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.OpenDocument(),
+    ) { uri -> if (uri != null) readPortable(uri) }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -158,6 +179,12 @@ class MainActivity : Activity() {
             }
             addView(logView, matchWidth())
             addView(secondaryButton("清空日志") { DiagLog.clear() }, matchWidth())
+        })
+
+        page.addView(card("多终端配置", "导出的 JSON 与 PC 端 GatePass 通用，可在多台设备间同步账号与路由。") {
+            addView(primaryButton("导出配置（含密码）") { exportPortable(includePassword = true) }, matchWidth())
+            addView(secondaryButton("导出配置（不含密码）") { exportPortable(includePassword = false) }, matchWidth())
+            addView(secondaryButton("导入配置…") { importPortable() }, matchWidth())
         })
 
         page.addView(card("安全", "账号、会话、网关令牌与证书私钥均以 Android Keystore 加密保存。") {
@@ -482,15 +509,7 @@ class MainActivity : Activity() {
             requestPermissions(arrayOf(android.Manifest.permission.POST_NOTIFICATIONS), REQUEST_NOTIFICATIONS)
         }
         val prepare = VpnService.prepare(this)
-        if (prepare != null) startActivityForResult(prepare, REQUEST_VPN) else startVpnService()
-    }
-
-    @Deprecated("VPN consent result uses the platform activity result contract")
-    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
-        super.onActivityResult(requestCode, resultCode, data)
-        if (requestCode == REQUEST_VPN) {
-            if (resultCode == Activity.RESULT_OK) startVpnService() else showStatus("未授予 VPN 权限")
-        }
+        if (prepare != null) vpnLauncher.launch(prepare) else startVpnService()
     }
 
     private fun startVpnService() {
@@ -543,6 +562,57 @@ class MainActivity : Activity() {
     private fun copyToClipboard(text: String) {
         getSystemService(ClipboardManager::class.java)
             .setPrimaryClip(ClipData.newPlainText("GatePass", text))
+    }
+
+    // ---------------------------------------------------------------- portable config
+
+    /** Opens the system "save as" picker; the actual write happens in onActivityResult. */
+    private fun exportPortable(includePassword: Boolean) {
+        pendingExportIncludePassword = includePassword
+        val name = "gatepass-config${if (includePassword) "" else "-nopass"}.json"
+        runCatching { exportLauncher.launch(name) }
+            .onFailure { showStatus("无法打开文件选择器: ${it.message}") }
+    }
+
+    private fun writePortable(uri: android.net.Uri, includePassword: Boolean) {
+        runCatching {
+            val data = store.toPortable(includePassword)
+            val text = PortableConfig.encode(data, includePassword)
+            contentResolver.openOutputStream(uri)?.use { it.write(text.toByteArray(Charsets.UTF_8)) }
+                ?: throw IllegalStateException("无法写入所选文件")
+            DiagLog.log("已导出配置: ${data.routes.size} 条路由，含密码=$includePassword")
+            showStatus(
+                if (includePassword) "已导出（含密码，请妥善保管）" else "已导出（不含密码）",
+            )
+        }.onFailure {
+            DiagLog.error("导出配置失败", it)
+            showStatus(it.message ?: "导出失败")
+        }
+    }
+
+    /** Opens the system file picker; parsing happens in onActivityResult. */
+    private fun importPortable() {
+        runCatching {
+            importLauncher.launch(arrayOf("application/json", "text/plain", "application/octet-stream"))
+        }.onFailure { showStatus("无法打开文件选择器: ${it.message}") }
+    }
+
+    private fun readPortable(uri: android.net.Uri) {
+        runCatching {
+            val text = contentResolver.openInputStream(uri)?.use { it.readBytes().toString(Charsets.UTF_8) }
+                ?: throw IllegalStateException("无法读取所选文件")
+            val data = PortableConfig.decode(text)
+            val count = store.applyPortable(data)
+            DiagLog.log("已导入配置: ${data.username} @ ${data.authBase}，${count} 条路由")
+            baseUrl.setText(data.authBase)
+            username.setText(data.username)
+            if (data.password.isNotBlank()) password.setText(data.password)
+            refreshRoutes()
+            showStatus("已导入 $count 条路由；如 VPN 正在运行请重启")
+        }.onFailure {
+            DiagLog.error("导入配置失败", it)
+            showStatus(it.message ?: "导入失败")
+        }
     }
 
     // ---------------------------------------------------------------- widgets
@@ -637,6 +707,8 @@ class MainActivity : Activity() {
     companion object {
         private const val REQUEST_VPN = 501
         private const val REQUEST_NOTIFICATIONS = 502
+        private const val REQUEST_EXPORT = 503
+        private const val REQUEST_IMPORT = 504
         private const val CA_FILE_NAME = "gatepass-ca.crt"
         private const val NEWLINE = "\n"
 

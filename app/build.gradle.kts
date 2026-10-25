@@ -25,8 +25,8 @@ android {
         applicationId = "com.yuceyang.gatepassandroid"
         minSdk = 29
         targetSdk = 36
-        versionCode = 2
-        versionName = "0.1.1"
+        versionCode = 3
+        versionName = "0.2.0"
         testInstrumentationRunner = "android.test.InstrumentationTestRunner"
     }
 
@@ -74,8 +74,11 @@ kotlin {
 
 dependencies {
     implementation(libs.androidx.core.ktx)
+    implementation(libs.androidx.activity)
     implementation(libs.bcprov)
     implementation(libs.bcpkix)
     implementation(files("libs/hev-socks5-tunnel-2.19.1.aar"))
     testImplementation(libs.junit)
+    // Android's org.json is a stub in JVM unit tests; use the real implementation.
+    testImplementation(libs.org.json)
 }
