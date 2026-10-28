@@ -3,7 +3,8 @@
   "version": 1,
   "provider": {
     "id": "ugos",
-    "authBase": "https://nas.example",
+    "alias": "example",
+    "authBase": "",
     "username": "redacted-user",
     "password": "",
     "domainSuffix": "example.ugdocker.link"
@@ -12,17 +13,20 @@
     {
       "host": "app-5006-example.ugdocker.link",
       "enabled": true,
-      "httpIngress": true
+      "httpIngress": true,
+      "kind": "app"
     },
     {
       "host": "app16601-example.ugdocker.link",
       "enabled": true,
-      "httpIngress": true
+      "httpIngress": true,
+      "kind": "app"
     },
     {
-      "host": "app-9090-example.ugdocker.link",
+      "host": "app-9443-example.ugdocker.link",
       "enabled": true,
-      "httpIngress": true
+      "httpIngress": true,
+      "kind": "system"
     }
   ]
 }

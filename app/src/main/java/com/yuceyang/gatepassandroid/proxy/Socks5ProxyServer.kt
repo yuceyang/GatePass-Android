@@ -1,5 +1,6 @@
 package com.yuceyang.gatepassandroid.proxy
 
+import com.yuceyang.gatepassandroid.auth.RouteResolver
 import com.yuceyang.gatepassandroid.auth.UgosAuthClient
 import com.yuceyang.gatepassandroid.data.SecureSettingsStore
 import com.yuceyang.gatepassandroid.diag.DiagLog
@@ -28,6 +29,8 @@ class Socks5ProxyServer(
     private val protectDatagram: (DatagramSocket) -> Boolean,
     private val underlyingNetwork: Network?,
     private val port: Int = DEFAULT_PORT,
+    /** Maps a route's host to the gateway host to dial right now (suffix may have moved). */
+    private val resolver: RouteResolver = RouteResolver(store, underlyingNetwork),
 ) : AutoCloseable {
     private val running = AtomicBoolean(false)
     private val workers = Executors.newCachedThreadPool()
@@ -165,7 +168,12 @@ class Socks5ProxyServer(
             DiagLog.log("拦截 $host：NAS 会话已过期，请在 GatePass 中重新登录")
             return writeError(clientOutput, 401, "NAS session expired — reopen GatePass and log in again")
         }
-        val gatewayToken = store.loadGatewayToken(host).ifBlank {
+        // The gateway may have moved (cn68 → cn11); dial whatever it is now, not the route name.
+        val upstreamTarget = resolver.upstreamFor(host)
+        val dialHost = upstreamTarget.host
+        // A system route is served by the relay host and authenticates from the session cookie;
+        // there is no dockerToken for it because :9443 is not a mapped port.
+        val gatewayToken = if (upstreamTarget.system) "" else store.loadGatewayToken(host).ifBlank {
             DiagLog.log("缓存无网关令牌，刷新 $host")
             val issued = UgosAuthClient(underlyingNetwork, DiagLog::log).gatewayToken(
                 nas.baseUrl,
@@ -176,8 +184,8 @@ class Socks5ProxyServer(
             issued.value
         }
 
-        DiagLog.log("转发 ${request.method} https://$host${request.target}（已注入 NAS 凭据）")
-        val pooled = upstreams.acquire(host)
+        DiagLog.log("转发 ${request.method} https://$host${request.target}（上游 $dialHost）")
+        val pooled = upstreams.acquire(dialHost)
         var reusable = false
         try {
             val upstreamOutput = pooled.output
@@ -191,7 +199,7 @@ class Socks5ProxyServer(
                     upstreamOutput.write("$name: $value\r\n".toByteArray(Charsets.ISO_8859_1))
                 }
             }
-            upstreamOutput.write("Host: $host\r\n".toByteArray(Charsets.ISO_8859_1))
+            upstreamOutput.write("Host: $dialHost\r\n".toByteArray(Charsets.ISO_8859_1))
             // Some Docker apps sit behind HTTP Basic on the gateway, but the client's own
             // Authorization (Bearer, etc.) must win when present — otherwise per-app tokens
             // such as Bitwarden's /api/sync credential get clobbered and sync fails with 401.
@@ -202,7 +210,11 @@ class Socks5ProxyServer(
                 upstreamOutput.write("Authorization: Basic $basic\r\n".toByteArray(Charsets.ISO_8859_1))
             }
             val clientCookies = headers.firstOrNull { it.first.equals("cookie", true) }?.second.orEmpty()
-            val cookies = mergeCookies(clientCookies, session.cookies, "ugreen-proxy-token=$gatewayToken")
+            val cookies = mergeCookies(
+                clientCookies,
+                session.cookies,
+                if (gatewayToken.isBlank()) "" else "ugreen-proxy-token=$gatewayToken",
+            )
             if (cookies.isNotBlank()) upstreamOutput.write("Cookie: $cookies\r\n".toByteArray(Charsets.ISO_8859_1))
             upstreamOutput.write("Connection: keep-alive\r\n\r\n".toByteArray(Charsets.ISO_8859_1))
 
@@ -224,7 +236,7 @@ class Socks5ProxyServer(
             clientOutput.flush()
             reusable = selfDelimited && !head.connectionClose && !pooled.broken
         } finally {
-            upstreams.release(host, pooled, reusable)
+            upstreams.release(dialHost, pooled, reusable)
         }
     }
 

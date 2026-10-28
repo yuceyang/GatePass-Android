@@ -76,13 +76,33 @@ adb install -r GatePass-Android-x.y.z.apk
 
 ## 使用
 
-1. **NAS 登录**：填写 NAS 地址、用户名、密码，点「保存并测试登录」
-2. **添加路由**：输入应用域名（如 `app-5006-xxxx.ugdocker.link`），添加后默认开启入口
+1. **NAS 登录**：填 **UGREENlink 别名**（`ug.link` 后面那段，如 `yuceyang`）、用户名、密码，
+   再填一个**固定代理域名后缀**（如 `yuceyang.cn68.ugdocker.link`），点「保存并测试登录」
+2. **添加路由**：填应用端口（如 `5006`）即可，主机名按「端口 + 固定后缀」自动生成；
+   需要手动指定时在「主机名」里填完整域名
+   - **9443 这类 NAS 系统服务要勾选「NAS 系统服务」**，否则会得到 `400 Bad Request`
 3. **接入应用**：
    - 思源等：把 WebDAV 地址改成 `http://127.0.0.1:18080/<域名>/<原路径>`
    - 浏览器等：点「一键安装根证书」→ 系统设置里选「从存储设备安装证书」→ 选 `Download/gatepass-ca.crt`，
      然后启动 VPN
 4. **排查**：每条路由有「测试连通」按钮；页面底部有实时运行日志
+
+### 为什么只需要别名
+
+绿联的远程访问地址会随 NAS 重新注册而变化（`cn68` → `cn11`）。GatePass 保存的只是**别名**，
+每次启动和每 10 分钟向 UGREENlink 查询一次设备当前的真实地址，拨号时自动使用。
+
+你访问时用的主机名则由**固定后缀**决定，所以浏览器书签、应用配置里的地址永远不用改。
+
+### NAS 系统服务（如 9443 后台）
+
+`9443` 是 NAS 系统自身的 HTTPS 端口（UGOS Pro 桌面），而绿联的 Docker 端口映射只转发明文
+HTTP，所以经映射访问必然得到 nginx 的 `400 The plain HTTP request was sent to HTTPS port`。
+
+勾选「NAS 系统服务」后，GatePass 会改走中继域名（`<别名>.<relayDomain>`，如
+`yuceyang.cn11.ug.link`），并用 NAS 会话 Cookie 鉴权，不再申请 docker token。
+
+> 普通应用**不要**勾选此项——它会让请求绕过端口映射。
 
 ## 从源码构建
 
@@ -151,19 +171,25 @@ GATEPASS_KEY_PASSWORD=***
   "version": 1,
   "provider": {
     "id": "ugos",
-    "authBase": "https://nas.example",
+    // 别名是跨设备通用的身份；远程地址在运行时查询，所以 authBase 通常为空
+    "alias": "yuceyang",
+    "authBase": "",
     "username": "you",
     "password": "••••",
-    "domainSuffix": "example.ugdocker.link"
+    "domainSuffix": "yuceyang.cn68.ugdocker.link"
   },
   "routes": [
-    { "host": "app-5006-example.ugdocker.link", "enabled": true, "httpIngress": true }
+    { "host": "app-5006-yuceyang.cn68.ugdocker.link", "enabled": true, "httpIngress": true, "kind": "app" },
+    { "host": "app-9443-yuceyang.cn68.ugdocker.link", "enabled": true, "httpIngress": false, "kind": "system" }
   ]
 }
 ```
 
-**只包含跨平台通用的内容**：NAS 地址、账号密码、路由列表。监听端口、开机自启、
+**只包含跨平台通用的内容**：NAS 别名/地址、账号密码、路由列表。监听端口、开机自启、
 hosts、CA 信任这些因平台而异的状态**不在文件里**，所以同一个文件在每台设备上都能直接用。
+
+- `provider.alias` 与 `provider.authBase` 至少要有一个；有别名时地址在运行时解析，`authBase` 可留空。
+- `routes[].kind`：`app`（默认，走端口映射）或 `system`（走中继，如 9443 后台）。
 
 | 端 | 导出 | 导入 |
 |---|---|---|

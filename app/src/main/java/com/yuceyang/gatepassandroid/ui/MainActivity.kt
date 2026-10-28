@@ -31,10 +31,13 @@ import com.yuceyang.gatepassandroid.vpn.GatePassVpnService
 
 class MainActivity : androidx.activity.ComponentActivity() {
     private lateinit var store: SecureSettingsStore
-    private lateinit var baseUrl: EditText
+    private lateinit var aliasField: EditText
+    private lateinit var suffixField: EditText
     private lateinit var username: EditText
     private lateinit var password: EditText
+    private lateinit var routePort: EditText
     private lateinit var routeHost: EditText
+    private lateinit var routeSystem: android.widget.CheckBox
     private lateinit var status: TextView
     private lateinit var logView: TextView
     private lateinit var loginButton: Button
@@ -114,13 +117,17 @@ class MainActivity : androidx.activity.ComponentActivity() {
         }
         page.addView(buildHeader(), matchWidth())
 
-        page.addView(card("NAS 登录", "填写绿联 NAS 地址与账号，GatePass 会替你完成登录并保存会话。") {
-            baseUrl = input("NAS 地址", "https://", InputType.TYPE_TEXT_VARIATION_URI)
+        page.addView(card("NAS 登录", "只需填 UGREENlink 别名和账号。GatePass 会自动向绿联查询设备当前的访问地址。") {
+            aliasField = input("UGREENlink 别名", "yuceyang", InputType.TYPE_TEXT_VARIATION_URI)
             username = input("用户名", "NAS 登录账号")
             password = input("密码", "NAS 登录密码", InputType.TYPE_TEXT_VARIATION_PASSWORD)
-            addView(baseUrl, matchWidth())
+            suffixField = input("固定代理域名后缀", "yuceyang.cn68.ugdocker.link")
+            addView(aliasField, matchWidth())
             addView(username, matchWidth())
             addView(password, matchWidth())
+            addView(suffixField, matchWidth())
+            addView(hint("别名就是 ug.link 后面的名字。远程地址会随 NAS 重新注册而变化（cn68 → cn11），" +
+                "别名不用改；固定后缀决定你访问时用的主机名，填一次即可长期不变。"), matchWidth())
             loginStateView = TextView(this@MainActivity).apply {
                 textSize = 13f
                 setPadding(0, 0, 0, dp(8))
@@ -130,10 +137,19 @@ class MainActivity : androidx.activity.ComponentActivity() {
             addView(loginButton, matchWidth())
         })
 
-        page.addView(card("代理路由", "为每个 NAS 应用域名单独开启 HTTP 入口，然后复制地址到对应应用。") {
-            routeHost = input("应用域名", "app-8080-****.example.com")
+        page.addView(card("代理路由", "填应用端口即可，主机名按「端口 + 固定后缀」自动生成。") {
+            routePort = input("应用端口", "5006", InputType.TYPE_CLASS_NUMBER)
+            routeHost = input("主机名（高级，留空自动生成）", "app-5006-****.ugdocker.link")
+            routeSystem = android.widget.CheckBox(this@MainActivity).apply {
+                text = "NAS 系统服务（如 9443 后台；经中继访问，不走向端口映射）"
+                textSize = 13f
+                setTextColor(COLOR_TEXT)
+                setPadding(0, dp(4), 0, dp(8))
+            }
+            addView(routePort, matchWidth())
             addView(routeHost, matchWidth())
-            addView(primaryButton("添加域名路由") { saveRoute() }, matchWidth())
+            addView(routeSystem, matchWidth())
+            addView(primaryButton("添加路由") { saveRoute() }, matchWidth())
             routeList = LinearLayout(this@MainActivity).apply {
                 orientation = LinearLayout.VERTICAL
                 setPadding(0, dp(6), 0, 0)
@@ -344,7 +360,7 @@ class MainActivity : androidx.activity.ComponentActivity() {
             ).apply { bottomMargin = dp(8) }
         }
         row.addView(TextView(this).apply {
-            text = host
+            text = if (store.routeKind(host) == ProxyRoute.KIND_SYSTEM) "$host  · NAS 系统服务" else host
             textSize = 13f
             typeface = Typeface.MONOSPACE
             setTextColor(COLOR_TEXT)
@@ -434,41 +450,83 @@ class MainActivity : androidx.activity.ComponentActivity() {
     }
 
     private fun saveRoute() {
-        val route = ProxyRoute.parse(routeHost.text.toString())
+        val suffix = suffixField.text.toString().trim().removePrefix(".")
+        val port = routePort.text.toString().trim().removePrefix("app-").removePrefix("-")
+        val system = routeSystem.isChecked
+        val typed = routeHost.text.toString().trim()
+        // A blank hostname means "generate it from the port and the fixed suffix".
+        val host = typed.ifBlank {
+            if (port.isBlank()) {
+                showStatus("请填写应用端口")
+                return
+            }
+            if (suffix.isBlank()) {
+                showStatus("请先填写固定代理域名后缀")
+                return
+            }
+            "app-${port}-$suffix"
+        }
+        val route = ProxyRoute.parse(host, if (system) ProxyRoute.KIND_SYSTEM else ProxyRoute.KIND_APP)
         if (route == null) {
             showStatus("域名格式不正确")
             return
         }
         store.addRoute(route.host)
+        store.setRouteKind(route.host, route.kind)
         store.setHttpIngressEnabled(route.host, true)
+        routePort.setText("")
         routeHost.setText("")
+        routeSystem.isChecked = false
         refreshRoutes()
-        showStatus("已添加路由，HTTP 入口默认开启")
+        showStatus("已添加路由 ${route.host}，HTTP 入口默认开启")
     }
 
     // ---------------------------------------------------------------- actions
 
     private fun testLogin() {
-        val base = baseUrl.text.toString().trim()
+        val alias = aliasField.text.toString().trim()
+        val suffix = suffixField.text.toString().trim().removePrefix(".")
         val user = username.text.toString().trim()
         // An imported config restores the password into storage but leaves the field empty (it is
         // a password field). Fall back to the stored one instead of refusing to log in.
         val stored = store.loadNas().password
         val pass = password.text.toString().ifBlank { stored }
-        if (base.isBlank() || user.isBlank() || pass.isBlank()) {
-            showStatus("请填写 NAS 地址、用户名和密码")
+        if (alias.isBlank() || user.isBlank() || pass.isBlank()) {
+            showStatus("请填写 UGREENlink 别名、用户名和密码")
             return
         }
-        store.saveNas(base, user, pass)
+        store.saveAlias(alias)
+        if (suffix.isNotBlank()) store.saveFixedSuffix(suffix)
         showStatus("正在连接 NAS…")
         Thread({
-            val result = runCatching { UgosAuthClient(log = DiagLog::log).login(base, user, pass) }
+            val result = runCatching {
+                val client = UgosAuthClient(log = DiagLog::log)
+                // Resolve the live host first: the manual address may point at a suffix the NAS
+                // has since abandoned. Fall back to the stored address if the lookup fails.
+                val manual = store.loadNas().baseUrl
+                val base = runCatching { client.resolveBase(alias, manual, user) }
+                    .getOrElse { manual.trim().trimEnd('/') }
+                if (base.isBlank()) throw IllegalStateException("无法解析 $alias 的访问地址，请检查别名或网络")
+                // Persist the address actually used, so later gateway-token calls hit the same host.
+                store.saveNas(base, user, pass)
+                val session = client.loginAt(base, user, pass)
+                // Remember which suffix/relay the NAS reports right now — the proxy dials these.
+                client.lookupByAlias(alias)?.let { node ->
+                    store.saveDiscovered(node.domainSuffix, node.relayHost)
+                    if (store.fixedSuffix().isBlank() && node.domainSuffix.isNotBlank()) {
+                        store.saveFixedSuffix(node.domainSuffix)
+                    }
+                }
+                base to session
+            }
             runOnUiThread {
-                result.onSuccess { session ->
+                result.onSuccess { (base, session) ->
                     store.saveSession(session.sessionToken, session.cookieHeader)
                     password.setText("")
+                    password.clearFocus()
                     refreshLoginState()
-                    showStatus("NAS 登录成功")
+                    refreshRoutes()
+                    showStatus("NAS 登录成功（$base）")
                 }.onFailure { error ->
                     DiagLog.error("NAS 登录失败", error)
                     showStatus(error.message ?: "NAS 登录失败")
@@ -627,7 +685,8 @@ class MainActivity : androidx.activity.ComponentActivity() {
 
     private fun restoreFields() {
         val saved = store.loadNas()
-        baseUrl.setText(saved.baseUrl)
+        aliasField.setText(saved.alias)
+        suffixField.setText(store.fixedSuffix())
         username.setText(saved.username)
         refreshRoutes()
     }
@@ -676,8 +735,9 @@ class MainActivity : androidx.activity.ComponentActivity() {
                 ?: throw IllegalStateException("无法读取所选文件")
             val data = PortableConfig.decode(text)
             val count = store.applyPortable(data)
-            DiagLog.log("已导入配置: ${data.username} @ ${data.authBase}，${count} 条路由")
-            baseUrl.setText(data.authBase)
+            DiagLog.log("已导入配置: ${data.username} @ ${data.alias.ifBlank { data.authBase }}，${count} 条路由")
+            aliasField.setText(data.alias)
+            suffixField.setText(data.domainSuffix)
             username.setText(data.username)
             if (data.password.isNotBlank()) password.setText(data.password)
             refreshRoutes()
@@ -701,6 +761,14 @@ class MainActivity : androidx.activity.ComponentActivity() {
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { bottomMargin = dp(8) }
+    }
+
+    /** Small muted paragraph used for explanatory copy inside a card. */
+    private fun hint(value: String) = TextView(this).apply {
+        text = value
+        textSize = 12f
+        setTextColor(COLOR_MUTED)
+        setPadding(0, 0, 0, dp(8))
     }
 
     private fun primaryButton(value: String, action: () -> Unit) = Button(this).apply {

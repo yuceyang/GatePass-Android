@@ -22,3 +22,4 @@ keystore.properties
 
 # Local handoff notes (may contain real hostnames)
 /HANDOFF.md
+.claude/

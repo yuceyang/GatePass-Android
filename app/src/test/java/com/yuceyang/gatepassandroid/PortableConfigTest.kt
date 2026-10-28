@@ -86,12 +86,15 @@ class PortableConfigTest {
             .getResourceAsStream("desktop-export.json")!!
             .use { it.readBytes().toString(Charsets.UTF_8) }
         val data = PortableConfig.decode(text)
-        assertEquals("gatepass-portable/v1", "gatepass-portable/v1")
-        assertEquals("https://nas.example", data.authBase)
+        assertEquals("example", data.alias)
+        assertEquals("", data.authBase)
         assertEquals("redacted-user", data.username)
         assertEquals("example.ugdocker.link", data.domainSuffix)
         assertEquals(3, data.routes.size)
         assertTrue(data.routes.all { it.httpIngress })
+        // The :9443 desktop must stay a system route, or it would be dialled through the
+        // docker port mapping and answer "400 plain HTTP sent to HTTPS port".
+        assertEquals("system", data.routes.first { it.host.contains("9443") }.kind)
     }
 
     @Test
@@ -108,5 +111,40 @@ class PortableConfigTest {
         )
         assertEquals(1, data.routes.size)
         assertEquals("app-5006-example.com", data.routes[0].host)
+    }
+
+    /**
+     * The desktop stopped exporting `authBase` once the alias became the portable identity: the
+     * login host is looked up at runtime and moves whenever the NAS re-registers.
+     */
+    @Test
+    fun decodesAliasOnlyProvider() {
+        val data = PortableConfig.decode(
+            """{"version": 1, "provider": {"alias": "yuceyang", "authBase": "",
+               "username": "alice", "domainSuffix": "yuceyang.cn68.ugdocker.link"},
+               "routes": [{"host": "app-5006-yuceyang.cn68.ugdocker.link", "kind": "system"}]}""",
+        )
+        assertEquals("yuceyang", data.alias)
+        assertEquals("", data.authBase)
+        assertEquals("system", data.routes[0].kind)
+    }
+
+    @Test
+    fun rejectsProviderWithNeitherAliasNorAddress() {
+        val failure = runCatching {
+            PortableConfig.decode("""{"version": 1, "provider": {"username": "alice"}}""")
+        }.exceptionOrNull()
+        assertTrue(failure is IllegalArgumentException)
+        assertTrue(failure!!.message!!.contains("alias"))
+    }
+
+    @Test
+    fun keepsRouteKindAcrossEncode() {
+        val data = PortableConfig.decode(
+            """{"version": 1, "provider": {"alias": "yuceyang"},
+               "routes": [{"host": "app-9443-x.ugdocker.link", "kind": "system"}]}""",
+        )
+        val again = PortableConfig.decode(PortableConfig.encode(data))
+        assertEquals("system", again.routes[0].kind)
     }
 }

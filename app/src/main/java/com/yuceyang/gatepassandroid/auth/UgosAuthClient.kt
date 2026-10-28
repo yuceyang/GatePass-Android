@@ -23,8 +23,17 @@ class UgosAuthClient(
 ) {
 
     fun login(baseUrl: String, username: String, password: String): LoginResult {
-        val normalizedBase = baseUrl.trim().trimEnd('/')
-        require(normalizedBase.startsWith("https://", ignoreCase = true)) { "NAS 地址必须以 https:// 开头" }
+        val normalizedBase = resolveBaseOrThrow(baseUrl)
+        return loginAt(normalizedBase, username, password)
+    }
+
+    /**
+     * Logs in against an already-resolved gateway address.
+     *
+     * Split out from [login] so the caller can reuse the address that [lookupByAlias] returned
+     * instead of resolving it twice (each lookup is a round trip to UGREENlink).
+     */
+    fun loginAt(normalizedBase: String, username: String, password: String): LoginResult {
         require(username.isNotBlank() && password.isNotBlank()) { "请填写 NAS 用户名和密码" }
 
         log("检查 NAS: $normalizedBase/ugreen/v1/verify/check")
@@ -164,6 +173,98 @@ class UgosAuthClient(
         }
     }
 
+    /**
+     * Probes a gateway address. A usable NAS answers with an `x-rsa-token` header; a 200 that
+     * carries `{"code":407}` (device timeout) or an error page is a miss, which is exactly what
+     * made a naive "did it return 200?" check adopt a dead host.
+     */
+    fun isGatewayAlive(baseUrl: String, username: String): Boolean = runCatching {
+        val res = request(
+            "POST",
+            "${baseUrl.trim().trimEnd('/')}/ugreen/v1/verify/check",
+            JSONObject().put("username", username).toString(),
+        )
+        res.code == 200 && res.headers.keys.any { it.equals("x-rsa-token", ignoreCase = true) }
+    }.getOrDefault(false)
+
+    /**
+     * Asks UGREENlink which host currently fronts this device.
+     *
+     *   POST https://api.ugnas.com/api/p2p/v2/ta/nodeInfo/byAlias {"alias":"yuceyang"}
+     *   → { data: { appDomain: "cn11.ugapp.link", dockerDomain: "cn11.ugdocker.link",
+     *               relayDomain: "cn11.ug.link", ... } }
+     *
+     * `relayDomain` comes back without the alias, so the relay host is `<alias>.<relayDomain>`.
+     * Returns null when the service is unreachable or does not know the alias.
+     */
+    fun lookupByAlias(alias: String): NodeInfo? {
+        if (alias.isBlank()) return null
+        val res = runCatching {
+            request(
+                "POST",
+                NODE_INFO_URL,
+                JSONObject().put("alias", alias).toString(),
+                mapOf("Content-Type" to "application/json"),
+            )
+        }.getOrNull() ?: return null
+        val json = runCatching { JSONObject(res.body) }.getOrNull() ?: return null
+        if (json.optInt("code", -1) != 200) return null
+        val data = json.optJSONObject("data") ?: return null
+        val relay = data.optString("relayDomain").trim().trimEnd('/').removePrefix("https://").removePrefix("http://")
+        if (relay.isBlank()) return null
+        val docker = data.optString("dockerDomain").trim().trimEnd('/').removePrefix("https://").removePrefix("http://")
+        val relayHost = if (relay.contains(alias)) relay else "$alias.$relay"
+        return NodeInfo(
+            authBase = "https://$relayHost",
+            domainSuffix = if (docker.isBlank()) "" else "$alias.$docker",
+            relayHost = relayHost,
+        )
+    }
+
+    /**
+     * Finds a usable login address: the alias lookup first, then the manual address, then a
+     * scan of the neighbouring cnN hosts (for networks that block api.ugnas.com).
+     */
+    fun resolveBase(alias: String, manualBase: String, username: String): String {
+        if (alias.isNotBlank()) {
+            val hit = lookupByAlias(alias)
+            if (hit != null && isGatewayAlive(hit.authBase, username)) return hit.authBase
+            log("别名 $alias 未能解析到可用地址")
+        }
+        val manual = manualBase.trim().trimEnd('/')
+        if (manual.isNotBlank() && isGatewayAlive(manual, username)) return manual
+        val discovered = scanBase(manual, username)
+        return discovered ?: manual
+    }
+
+    /** The normal path: alias lookup, else the manual address, else a scan. */
+    private fun resolveBaseOrThrow(baseUrl: String): String {
+        val manual = baseUrl.trim().trimEnd('/')
+        require(manual.isEmpty() || manual.startsWith("https://", ignoreCase = true)) {
+            "NAS 地址必须以 https:// 开头"
+        }
+        if (manual.isNotEmpty()) return manual
+        throw IllegalStateException("请填写 UGREENlink 别名或 NAS 地址")
+    }
+
+    /**
+     * Probes cn1..cn40 for the same device label, for networks that cannot reach the
+     * UGREENlink API. Returns the first host that answers with a real RSA header.
+     */
+    private fun scanBase(manualBase: String, username: String): String? {
+        val host = runCatching { URL(manualBase).host }.getOrNull() ?: return null
+        val match = SCAN_HOST.find(host) ?: return null
+        val label = match.groupValues[1]
+        for (index in 1..SCAN_RANGE) {
+            val candidate = "https://$label.cn$index.ug.link"
+            if (isGatewayAlive(candidate, username)) {
+                log("扫描发现可用地址: $candidate")
+                return candidate
+            }
+        }
+        return null
+    }
+
     private fun encryptPassword(publicKeyPem: String, password: String): String {
         val encoded = publicKeyPem
             .replace("-----BEGIN RSA PUBLIC KEY-----", "")
@@ -183,13 +284,20 @@ class UgosAuthClient(
 
     data class LoginResult(val sessionToken: String, val cookieHeader: String)
     data class GatewayToken(val value: String, val expiresAtEpochMs: Long)
+
+    /** What UGREENlink reports for an alias: the live gateway and relay hosts. */
+    data class NodeInfo(val authBase: String, val domainSuffix: String, val relayHost: String)
+
     private data class HttpResult(val code: Int, val body: String, val headers: Map<String, List<String>>)
 
     companion object {
         private const val TIMEOUT_MS = 15_000
         private const val GATEWAY_TOKEN_TTL_MS = 2L * 60 * 60 * 1000
+        private const val NODE_INFO_URL = "https://api.ugnas.com/api/p2p/v2/ta/nodeInfo/byAlias"
+        private const val SCAN_RANGE = 40
         private val PROXY_TOKEN = Regex("""ugreen-proxy-token=([0-9a-fA-F-]{36})""")
         private val PORT_FROM_HOST = Regex("""^app-?(\d+)""", RegexOption.IGNORE_CASE)
+        private val SCAN_HOST = Regex("""^(.+?)\.cn\d+\.ug\.link$""", RegexOption.IGNORE_CASE)
 
         /** `x-rsa-token` is base64 of a PEM public key. */
         fun decodePublicKeyPem(headerValue: String): String {

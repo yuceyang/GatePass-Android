@@ -25,7 +25,61 @@ class SecureSettingsStore(context: Context) {
         baseUrl = prefs.getString("nas_url", "") ?: "",
         username = decrypt(prefs.getString("nas_user", null)),
         password = decrypt(prefs.getString("nas_password", null)),
+        alias = prefs.getString(KEY_LINK_ALIAS, "") ?: "",
     )
+
+    /** UGREENlink alias; the login host is resolved from it at runtime. */
+    fun saveAlias(alias: String) {
+        prefs.edit().putString(KEY_LINK_ALIAS, alias.trim()).apply()
+    }
+
+    /**
+     * The suffix UGREENlink reports right now, and the relay host that serves NAS system pages.
+     *
+     * The gateway suffix moves whenever the NAS re-registers (cn68 → cn11). Routes keep the
+     * user's fixed suffix (bookmarks), and this is what the proxy dials instead.
+     */
+    fun saveDiscovered(domainSuffix: String, relayHost: String, nowEpochMs: Long = System.currentTimeMillis()) {
+        prefs.edit()
+            .putString(KEY_LIVE_SUFFIX, domainSuffix.trim())
+            .putString(KEY_RELAY_HOST, relayHost.trim())
+            .putLong(KEY_DISCOVERED_AT, nowEpochMs)
+            .apply()
+    }
+
+    data class Discovered(val domainSuffix: String, val relayHost: String, val atEpochMs: Long)
+
+    fun loadDiscovered(): Discovered = Discovered(
+        domainSuffix = prefs.getString(KEY_LIVE_SUFFIX, "") ?: "",
+        relayHost = prefs.getString(KEY_RELAY_HOST, "") ?: "",
+        atEpochMs = prefs.getLong(KEY_DISCOVERED_AT, 0L),
+    )
+
+    /** True when a lookup has ever completed, i.e. dialling may use the live suffix. */
+    fun hasDiscovered(): Boolean = loadDiscovered().domainSuffix.isNotBlank()
+
+    /** The user's fixed suffix — what routes and bookmarks are built from. */
+    fun fixedSuffix(): String = persistedDomainSuffix()
+
+    fun saveFixedSuffix(suffix: String) {
+        prefs.edit().putString(KEY_DOMAIN_SUFFIX, suffix.trim().removePrefix(".")).apply()
+    }
+
+    /**
+     * Rewrites [host]'s suffix from the fixed one to the live one, so a route keeps working
+     * after the NAS re-registers without the user editing a bookmark.
+     */
+    fun liveUpstreamHost(host: String): String {
+        val d = loadDiscovered()
+        val fixed = fixedSuffix()
+        if (d.domainSuffix.isBlank() || fixed.isBlank() || d.domainSuffix == fixed) return host
+        val lower = host.lowercase()
+        if (!lower.endsWith(fixed.lowercase())) return host
+        return host.dropLast(fixed.length) + d.domainSuffix
+    }
+
+    /** The relay host for a system route, or null before any lookup has happened. */
+    fun relayHost(): String? = loadDiscovered().relayHost.takeIf { it.isNotBlank() }
 
     /**
      * Stores the NAS session together with when it was obtained.
@@ -120,15 +174,17 @@ class SecureSettingsStore(context: Context) {
         val nas = loadNas()
         return PortableConfig.Data(
             providerId = "ugos",
+            alias = nas.alias,
             authBase = nas.baseUrl,
             username = nas.username,
             password = if (includePassword) nas.password else "",
-            domainSuffix = persistedDomainSuffix().ifBlank { deriveDomainSuffix(loadRoutes()) },
+            domainSuffix = fixedSuffix().ifBlank { deriveDomainSuffix(loadRoutes()) },
             routes = loadRoutes().sorted().map { host ->
                 PortableConfig.Rule(
                     host = host,
                     enabled = true,
                     httpIngress = isHttpIngressEnabled(host),
+                    kind = routeKind(host),
                 )
             },
         )
@@ -137,9 +193,15 @@ class SecureSettingsStore(context: Context) {
     /** Applies an imported snapshot; returns how many routes were written. */
     fun applyPortable(data: PortableConfig.Data): Int {
         saveNas(data.authBase, data.username, data.password)
-        rememberDomainSuffix(data.domainSuffix)
+        saveAlias(data.alias)
+        saveFixedSuffix(data.domainSuffix)
+        // The imported file may point at a different NAS, so drop the previous lookup and any
+        // gateway tokens keyed by the old hostnames.
+        clearDiscovery()
+        clearGatewayTokens()
         val hosts = data.routes.filter { it.enabled }.map { it.host }
         saveRoutes(hosts)
+        saveRouteKinds(data.routes.associate { it.host to it.kind })
         // Reset the ingress switches so the import is authoritative rather than additive.
         prefs.edit().remove("ingress_enabled_hosts").apply()
         data.routes.filter { it.enabled && it.httpIngress }.forEach {
@@ -148,12 +210,44 @@ class SecureSettingsStore(context: Context) {
         return hosts.size
     }
 
-    /** Suffix remembered from the last import/export, so it survives a round trip. */
-    private fun persistedDomainSuffix(): String = prefs.getString(KEY_DOMAIN_SUFFIX, "") ?: ""
-
-    private fun rememberDomainSuffix(value: String) {
-        prefs.edit().putString(KEY_DOMAIN_SUFFIX, value.trim()).apply()
+    private fun clearDiscovery() {
+        prefs.edit()
+            .remove(KEY_LIVE_SUFFIX)
+            .remove(KEY_RELAY_HOST)
+            .remove(KEY_DISCOVERED_AT)
+            .apply()
     }
+
+    private fun clearGatewayTokens() {
+        val edit = prefs.edit()
+        prefs.all.keys.filter { it.startsWith("gateway_token_") }.forEach(edit::remove)
+        edit.apply()
+    }
+
+    // ---- route kind ('app' | 'system')
+
+    fun routeKind(host: String): String =
+        ProxyRoute.normaliseKind(prefs.getString("route_kind_" + keyOf(host), null))
+
+    fun setRouteKind(host: String, kind: String) {
+        prefs.edit().putString("route_kind_" + keyOf(host), ProxyRoute.normaliseKind(kind)).apply()
+    }
+
+    private fun saveRouteKinds(kinds: Map<String, String>) {
+        val edit = prefs.edit()
+        prefs.all.keys.filter { it.startsWith("route_kind_") }.forEach(edit::remove)
+        kinds.forEach { (host, kind) -> edit.putString("route_kind_" + keyOf(host), ProxyRoute.normaliseKind(kind)) }
+        edit.apply()
+    }
+
+    private fun keyOf(host: String): String =
+        Base64.encodeToString(
+            host.lowercase().toByteArray(Charsets.UTF_8),
+            Base64.URL_SAFE or Base64.NO_WRAP or Base64.NO_PADDING,
+        )
+
+    /** The user's fixed suffix, remembered across import/export round trips. */
+    private fun persistedDomainSuffix(): String = prefs.getString(KEY_DOMAIN_SUFFIX, "") ?: ""
 
     /**
      * Fallback when no suffix was ever imported: the longest common suffix of the routes.
@@ -280,7 +374,12 @@ class SecureSettingsStore(context: Context) {
         return generator.generateKey()
     }
 
-    data class NasSettings(val baseUrl: String, val username: String, val password: String)
+    data class NasSettings(
+        val baseUrl: String,
+        val username: String,
+        val password: String,
+        val alias: String = "",
+    )
     data class AuthSession(val token: String, val cookies: String, val obtainedAtEpochMs: Long = 0L)
     data class CaMaterial(val privateKeyPkcs8: ByteArray, val certificateDer: ByteArray)
     data class LeafMaterial(val privateKeyPkcs8: ByteArray, val certificateDer: ByteArray, val expiresAtEpochMs: Long)
@@ -293,6 +392,10 @@ class SecureSettingsStore(context: Context) {
         private const val LEAF_RENEW_MARGIN_MS = 12L * 60 * 60 * 1000
         private const val INGRESS_ENABLED_KEY = "ingress_enabled_hosts"
         private const val KEY_DOMAIN_SUFFIX = "domain_suffix"
+        private const val KEY_LINK_ALIAS = "nas_alias"
+        private const val KEY_LIVE_SUFFIX = "live_domain_suffix"
+        private const val KEY_RELAY_HOST = "relay_host"
+        private const val KEY_DISCOVERED_AT = "discovered_at"
 
         /** UGOS keeps a login alive for about this long; used to warn before it lapses. */
         const val SESSION_TTL_MS = 12L * 60 * 60 * 1000

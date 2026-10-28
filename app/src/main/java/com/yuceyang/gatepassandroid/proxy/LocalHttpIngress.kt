@@ -1,6 +1,7 @@
 package com.yuceyang.gatepassandroid.proxy
 
 import android.net.Network
+import com.yuceyang.gatepassandroid.auth.RouteResolver
 import com.yuceyang.gatepassandroid.auth.UgosAuthClient
 import com.yuceyang.gatepassandroid.data.SecureSettingsStore
 import com.yuceyang.gatepassandroid.diag.DiagLog
@@ -29,6 +30,8 @@ class LocalHttpIngress(
     private val store: SecureSettingsStore,
     private val underlyingNetwork: Network?,
     private val port: Int = DEFAULT_PORT,
+    /** Maps a route's host to the gateway host to dial right now (suffix may have moved). */
+    private val resolver: RouteResolver = RouteResolver(store, underlyingNetwork),
 ) : AutoCloseable {
     private val running = AtomicBoolean(false)
     private val workers = Executors.newFixedThreadPool(MAX_WORKERS)
@@ -117,7 +120,13 @@ class LocalHttpIngress(
             writeError(output, 401, "请先在 GatePass 中登录 NAS")
             return false
         }
-        val gatewayToken = store.loadGatewayToken(host).ifBlank {
+        // The gateway may have moved (cn68 → cn11); dial whatever it is now, not the route name.
+        val resolverUpstream = resolver.upstreamFor(host)
+        val dialHost = resolverUpstream.host
+        // A system route (the UGOS desktop) is served by the relay host, which authenticates
+        // from the NAS session cookie. There is no dockerToken for it — :9443 is not a mapped
+        // port, so asking would only yield the "not a mapped port" error page.
+        val gatewayToken = if (resolverUpstream.system) "" else store.loadGatewayToken(host).ifBlank {
             DiagLog.log("HTTP 入口：缓存无网关令牌，刷新 $host")
             val issued = UgosAuthClient(underlyingNetwork, DiagLog::log).gatewayToken(
                 nas.baseUrl,
@@ -128,10 +137,10 @@ class LocalHttpIngress(
             issued.value
         }
 
-        DiagLog.log("HTTP 入口转发 ${requestLine.method} $host$upstreamPath")
+        DiagLog.log("HTTP 入口转发 ${requestLine.method} $host$upstreamPath → $dialHost")
         lastActivityAt = System.currentTimeMillis()
         val upstreamReusable = relay(
-            input, output, requestLine, headers, host, upstreamPath, nas, session, gatewayToken,
+            input, output, requestLine, headers, host, dialHost, upstreamPath, nas, session, gatewayToken,
         )
         if (!upstreamReusable || clientWantsClose) {
             if (!clientWantsClose) {
@@ -153,6 +162,7 @@ class LocalHttpIngress(
         request: RequestLine,
         headers: List<Pair<String, String>>,
         host: String,
+        dialHost: String,
         upstreamPath: String,
         nas: SecureSettingsStore.NasSettings,
         session: SecureSettingsStore.AuthSession,
@@ -163,11 +173,11 @@ class LocalHttpIngress(
         // written to the client yet; a retry after that would duplicate a response.
         var attempt = 0
         while (true) {
-            val pooled = upstreams.acquire(host)
+            val pooled = upstreams.acquire(dialHost)
             var reusable = false
             try {
                 return sendAndRelay(
-                    pooled, clientInput, clientOutput, request, headers, host, upstreamPath,
+                    pooled, clientInput, clientOutput, request, headers, dialHost, upstreamPath,
                     nas, session, gatewayToken,
                 ).also { reusable = it }
             } catch (error: Exception) {
@@ -177,7 +187,7 @@ class LocalHttpIngress(
                 DiagLog.log("上游连接失效，改用新连接重试 $host")
                 attempt++
             } finally {
-                upstreams.release(host, pooled, reusable)
+                upstreams.release(dialHost, pooled, reusable)
             }
         }
     }
@@ -188,7 +198,7 @@ class LocalHttpIngress(
         clientOutput: BufferedOutputStream,
         request: RequestLine,
         headers: List<Pair<String, String>>,
-        host: String,
+        dialHost: String,
         upstreamPath: String,
         nas: SecureSettingsStore.NasSettings,
         session: SecureSettingsStore.AuthSession,
@@ -205,7 +215,7 @@ class LocalHttpIngress(
                     upstreamOut.write("$name: $value\r\n".toByteArray(Charsets.ISO_8859_1))
                 }
             }
-            upstreamOut.write("Host: $host\r\n".toByteArray(Charsets.ISO_8859_1))
+            upstreamOut.write("Host: $dialHost\r\n".toByteArray(Charsets.ISO_8859_1))
             // Only synthesize NAS Basic auth when the client did not authenticate itself.
             // Overwriting this header breaks apps that use it for their own tokens — Bitwarden
             // sends "Authorization: Bearer <token>" on /api/sync, and replacing it makes the
@@ -223,7 +233,11 @@ class LocalHttpIngress(
                 upstreamOut.write("Authorization: Basic $basic\r\n".toByteArray(Charsets.ISO_8859_1))
             }
             val clientCookies = headers.firstOrNull { it.first.equals("Cookie", true) }?.second.orEmpty()
-            val cookies = mergeCookies(clientCookies, session.cookies, "ugreen-proxy-token=$gatewayToken")
+            val cookies = mergeCookies(
+                clientCookies,
+                session.cookies,
+                if (gatewayToken.isBlank()) "" else "ugreen-proxy-token=$gatewayToken",
+            )
             if (cookies.isNotBlank()) upstreamOut.write("Cookie: $cookies\r\n".toByteArray(Charsets.ISO_8859_1))
             upstreamOut.write("Connection: keep-alive\r\n\r\n".toByteArray(Charsets.ISO_8859_1))
 
