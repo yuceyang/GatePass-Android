@@ -177,7 +177,7 @@ class LocalHttpIngress(
             var reusable = false
             try {
                 return sendAndRelay(
-                    pooled, clientInput, clientOutput, request, headers, dialHost, upstreamPath,
+                    pooled, clientInput, clientOutput, request, headers, host, dialHost, upstreamPath,
                     nas, session, gatewayToken,
                 ).also { reusable = it }
             } catch (error: Exception) {
@@ -198,6 +198,7 @@ class LocalHttpIngress(
         clientOutput: BufferedOutputStream,
         request: RequestLine,
         headers: List<Pair<String, String>>,
+        routeHost: String,
         dialHost: String,
         upstreamPath: String,
         nas: SecureSettingsStore.NasSettings,
@@ -212,7 +213,14 @@ class LocalHttpIngress(
             upstreamOut.write("${request.method} $upstreamPath ${request.version}\r\n".toByteArray(Charsets.ISO_8859_1))
             headers.forEach { (name, value) ->
                 if (name.lowercase() !in DROP_REQUEST_HEADERS) {
-                    upstreamOut.write("$name: $value\r\n".toByteArray(Charsets.ISO_8859_1))
+                    // WebDAV MOVE/COPY name the fixed host in Destination; the upstream 404s
+                    // when that authority is not the host it was reached as.
+                    val forwarded = if (name.equals("Destination", true)) {
+                        WebDavDestination.rewrite(value, routeHost, dialHost) ?: value
+                    } else {
+                        value
+                    }
+                    upstreamOut.write("$name: $forwarded\r\n".toByteArray(Charsets.ISO_8859_1))
                 }
             }
             upstreamOut.write("Host: $dialHost\r\n".toByteArray(Charsets.ISO_8859_1))

@@ -196,7 +196,14 @@ class Socks5ProxyServer(
                     !name.equals("cookie", true) &&
                     !name.equals("host", true)
                 ) {
-                    upstreamOutput.write("$name: $value\r\n".toByteArray(Charsets.ISO_8859_1))
+                    // WebDAV MOVE/COPY name the fixed host in Destination; the upstream 404s
+                    // when that authority is not the host it was reached as.
+                    val forwarded = if (name.equals("Destination", true)) {
+                        WebDavDestination.rewrite(value, host, dialHost) ?: value
+                    } else {
+                        value
+                    }
+                    upstreamOutput.write("$name: $forwarded\r\n".toByteArray(Charsets.ISO_8859_1))
                 }
             }
             upstreamOutput.write("Host: $dialHost\r\n".toByteArray(Charsets.ISO_8859_1))
