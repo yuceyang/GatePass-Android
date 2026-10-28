@@ -511,22 +511,41 @@ class MainActivity : androidx.activity.ComponentActivity() {
                 store.saveNas(base, user, pass)
                 val session = client.loginAt(base, user, pass)
                 // Remember which suffix/relay the NAS reports right now — the proxy dials these.
+                var repairedSuffix: String? = null
                 client.lookupByAlias(alias)?.let { node ->
                     store.saveDiscovered(node.domainSuffix, node.relayHost)
-                    if (store.fixedSuffix().isBlank() && node.domainSuffix.isNotBlank()) {
-                        store.saveFixedSuffix(node.domainSuffix)
+                    // Repair only a *truncated* suffix, never replace the one the user chose: the
+                    // whole point of the fixed suffix is that it survives the NAS re-registering
+                    // (cn68 → cn11). An upgrade from 0.2.x left `cn68.ugdocker.link` with the
+                    // account label dropped, which would generate `app-5006-cn68.ugdocker.link`.
+                    val fixed = store.fixedSuffix()
+                    val repaired = when {
+                        fixed.isBlank() -> node.domainSuffix
+                        // Same domain family but missing the leading label(s).
+                        node.domainSuffix.isNotBlank() &&
+                            node.domainSuffix.endsWith(fixed, ignoreCase = true) &&
+                            node.domainSuffix.length > fixed.length -> node.domainSuffix
+                        else -> ""
+                    }
+                    if (repaired.isNotBlank()) {
+                        store.saveFixedSuffix(repaired)
+                        repairedSuffix = repaired
                     }
                 }
-                base to session
+                Triple(base, session, repairedSuffix)
             }
             runOnUiThread {
-                result.onSuccess { (base, session) ->
+                result.onSuccess { (base, session, repaired) ->
                     store.saveSession(session.sessionToken, session.cookieHeader)
                     password.setText("")
                     password.clearFocus()
+                    if (repaired != null) suffixField.setText(repaired)
                     refreshLoginState()
                     refreshRoutes()
-                    showStatus("NAS 登录成功（$base）")
+                    showStatus(
+                        if (repaired != null) "登录成功，已补全固定后缀为 $repaired"
+                        else "NAS 登录成功（$base）",
+                    )
                 }.onFailure { error ->
                     DiagLog.error("NAS 登录失败", error)
                     showStatus(error.message ?: "NAS 登录失败")

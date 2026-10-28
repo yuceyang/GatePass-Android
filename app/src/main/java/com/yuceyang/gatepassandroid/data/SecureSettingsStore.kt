@@ -250,10 +250,18 @@ class SecureSettingsStore(context: Context) {
     private fun persistedDomainSuffix(): String = prefs.getString(KEY_DOMAIN_SUFFIX, "") ?: ""
 
     /**
-     * Fallback when no suffix was ever imported: the longest common suffix of the routes.
-     * Note this is coarser than the real gateway suffix (it cannot know the extra labels).
+     * Derives the proxy suffix from an existing route when none was ever saved.
+     *
+     * A route reads `app-5006-yuceyang.cn68.ugdocker.link`, so everything after the `app-<port>-`
+     * prefix *is* the suffix. The previous implementation took the longest common domain suffix
+     * and therefore produced `cn68.ugdocker.link` — dropping the account label, which made every
+     * new route resolve to a host that does not exist (`app-5006-cn68.ugdocker.link`).
      */
     private fun deriveDomainSuffix(hosts: Set<String>): String {
+        for (host in hosts) {
+            HOST_PREFIX.find(host)?.let { return host.substring(it.value.length) }
+        }
+        // No route looks like an app host; fall back to the longest common suffix.
         if (hosts.isEmpty()) return ""
         val split = hosts.map { it.split('.') }
         val shortest = split.minOf { it.size }
@@ -396,6 +404,8 @@ class SecureSettingsStore(context: Context) {
         private const val KEY_LIVE_SUFFIX = "live_domain_suffix"
         private const val KEY_RELAY_HOST = "relay_host"
         private const val KEY_DISCOVERED_AT = "discovered_at"
+        /** `app-5006-`, `app16601-` — the part that precedes the proxy suffix in a route host. */
+        private val HOST_PREFIX = Regex("""^app-?\d+-""", RegexOption.IGNORE_CASE)
 
         /** UGOS keeps a login alive for about this long; used to warn before it lapses. */
         const val SESSION_TTL_MS = 12L * 60 * 60 * 1000
